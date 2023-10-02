@@ -1,67 +1,73 @@
-import Bull from 'bull';
-import thumbnailGenerator from 'image-thumbnail';
-import { promisify } from 'util';
-import fs from 'fs';
+import Queue from 'bull';
 import { ObjectId } from 'mongodb';
-import dbClient from './utils/db';
+import { promises as fsPromises } from 'fs';
+import fileUtils from './utils/file';
+import userUtils from './utils/user';
+import basicUtils from './utils/basic';
 
-const thumbnailQueue = new Bull('thumbnailQueue');
-const userQueue = new Bull('userQueue');
+const imageThumbnail = require('image-thumbnail');
 
-const writeFileAsync = promisify(fs.writeFile);
+const fileQueue = new Queue('fileQueue');
+const userQueue = new Queue('userQueue');
 
-thumbnailQueue.process(async (job) => {
-  const { userId, fileId } = job.data;
+fileQueue.process(async (job) => {
+  const { fileId, userId } = job.data;
 
-  if (!fileId) {
-    throw new Error('Missing fileId');
-  }
+  // Delete bull keys in redis
+  //   redis-cli keys "bull*" | xargs redis-cli del
 
   if (!userId) {
+    console.log('Missing userId');
     throw new Error('Missing userId');
   }
 
-  const file = await dbClient.findFile({ _id: ObjectId(fileId), userId });
-
-  if (!file) {
-    throw new Error('File not found');
+  if (!fileId) {
+    console.log('Missing fileId');
+    throw new Error('Missing fileId');
   }
 
-  if (file.type === 'image') {
-    const thumbnail500 = await thumbnailGenerator(file.localPath, { width: 500 });
-    const thumbnail250 = await thumbnailGenerator(file.localPath, { width: 250 });
-    const thumbnail100 = await thumbnailGenerator(file.localPath, { width: 100 });
+  if (!basicUtils.isValidId(fileId) || !basicUtils.isValidId(userId)) throw new Error('File not found');
 
-    const thumbnailPath500 = `${file.localPath}_500`;
-    const thumbnailPath250 = `${file.localPath}_250`;
-    const thumbnailPath100 = `${file.localPath}_100`;
+  const file = await fileUtils.getFile({
+    _id: ObjectId(fileId),
+    userId: ObjectId(userId),
+  });
 
-    await writeFileAsync(thumbnailPath500, thumbnail500);
-    await writeFileAsync(thumbnailPath250, thumbnail250);
-    await writeFileAsync(thumbnailPath100, thumbnail100);
+  if (!file) throw new Error('File not found');
 
-    await dbClient.updateFile({ _id: ObjectId(fileId) }, {
-      $set: {
-        localThumbnailPath500: thumbnailPath500,
-        localThumbnailPath250: thumbnailPath250,
-        localThumbnailPath100: thumbnailPath100,
-      },
-    });
-  }
+  const { localPath } = file;
+  const options = {};
+  const widths = [500, 250, 100];
+
+  widths.forEach(async (width) => {
+    options.width = width;
+    try {
+      const thumbnail = await imageThumbnail(localPath, options);
+      await fsPromises.writeFile(`${localPath}_${width}`, thumbnail);
+      //   console.log(thumbnail);
+    } catch (err) {
+      console.error(err.message);
+    }
+  });
 });
 
 userQueue.process(async (job) => {
   const { userId } = job.data;
+  // Delete bull keys in redis
+  //   redis-cli keys "bull*" | xargs redis-cli del
 
   if (!userId) {
+    console.log('Missing userId');
     throw new Error('Missing userId');
   }
 
-  const user = await dbClient.findUser({ _id: ObjectId(userId) });
+  if (!basicUtils.isValidId(userId)) throw new Error('User not found');
 
-  if (!user) {
-    throw new Error('User not found');
-  }
+  const user = await userUtils.getUser({
+    _id: ObjectId(userId),
+  });
+
+  if (!user) throw new Error('User not found');
 
   console.log(`Welcome ${user.email}!`);
 });
